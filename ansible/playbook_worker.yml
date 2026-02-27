@@ -1,0 +1,163 @@
+---
+# =============================================================================
+# playbook_worker.yml
+# Prepares the OS and joins the node to the existing K8s cluster.
+#
+# Sections:
+#   1. System Preparation  — swap, kernel modules, sysctl  (identical to master)
+#   2. Container Runtime   — containerd + SystemdCgroup
+#   3. Kubernetes Packages — kubelet, kubeadm, kubectl (held at v1.30)
+#   4. Cluster Join        — reads join command from /vagrant (written by master)
+#
+# Prerequisites: k8s-master must have finished provisioning so that
+# /vagrant/k8s-join-command.sh exists in the shared Vagrant folder.
+# =============================================================================
+- name: Prepare Worker Node and Join K8s Cluster
+  hosts: all
+  connection: local
+  become: true
+  vars:
+    k8s_version: "1.30"
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # 1. SYSTEM PREPARATION
+    # -------------------------------------------------------------------------
+    - name: Disable swap permanently
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\s+swap\s+.*)$'
+        replace: '# \1'
+
+    - name: Disable swap in the running session
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+
+    - name: Persist kernel modules for K8s
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        mode: "0644"
+
+    - name: Load kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Configure sysctl for K8s networking
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/k8s.conf
+        reload: true
+      loop:
+        - { name: 'net.bridge.bridge-nf-call-iptables',  value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+        - { name: 'net.ipv4.ip_forward',                 value: '1' }
+
+    # -------------------------------------------------------------------------
+    # 2. CONTAINER RUNTIME (containerd)
+    # -------------------------------------------------------------------------
+    - name: Install containerd
+      ansible.builtin.apt:
+        name: containerd
+        state: present
+        update_cache: true
+
+    - name: Generate default containerd configuration
+      ansible.builtin.shell: |
+        mkdir -p /etc/containerd
+        containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+
+    - name: Enable SystemdCgroup in containerd
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+
+    - name: Enable and restart containerd
+      ansible.builtin.service:
+        name: containerd
+        state: restarted
+        enabled: true
+
+    # -------------------------------------------------------------------------
+    # 3. KUBERNETES PACKAGES
+    # -------------------------------------------------------------------------
+    - name: Install apt transport dependencies
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gpg
+        state: present
+        update_cache: true
+
+    - name: Add Kubernetes GPG key
+      ansible.builtin.shell: |
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key \
+          | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg --yes
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /"
+        filename: kubernetes
+        state: present
+
+    - name: Install kubelet, kubeadm, kubectl
+      ansible.builtin.apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: true
+
+    - name: Hold K8s packages at current version
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    # -------------------------------------------------------------------------
+    # 4. CLUSTER JOIN
+    # The master writes the token + CA hash to /vagrant/k8s-join-command.sh.
+    # The Vagrant synced folder makes this file available on all worker VMs.
+    # The 'creates' guard ensures the join is idempotent.
+    # -------------------------------------------------------------------------
+    - name: Check that join command file exists
+      ansible.builtin.stat:
+        path: /vagrant/k8s-join-command.sh
+      register: join_file
+
+    - name: Fail if join command file is missing
+      ansible.builtin.fail:
+        msg: >
+          /vagrant/k8s-join-command.sh not found.
+          Ensure k8s-master has finished provisioning before running workers.
+      when: not join_file.stat.exists
+
+    - name: Join this node to the Kubernetes cluster
+      ansible.builtin.command: bash /vagrant/k8s-join-command.sh
+      args:
+        creates: /etc/kubernetes/kubelet.conf   # idempotency guard
+
+    - name: Print join confirmation
+      ansible.builtin.debug:
+        msg: "Node {{ ansible_hostname }} has joined the cluster successfully."

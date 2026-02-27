@@ -1,0 +1,270 @@
+---
+# =============================================================================
+# playbook_master.yml
+# Phase 1 of 2: Configures the Kubernetes control plane.
+# ArgoCD is NOT installed here — it runs in Phase 2 (playbook_argocd.yml)
+# after workers have joined, so the scheduler can place pods on workers.
+#
+# Sections:
+#   1. System Preparation  — swap, kernel modules, sysctl
+#   2. Container Runtime   — containerd + SystemdCgroup
+#   3. Kubernetes Packages — kubelet, kubeadm, kubectl (held at v1.30)
+#   4. Cluster Init        — kubeadm init, kubeconfig, Calico CNI
+#   5. CoreDNS Fix         — forward to 8.8.8.8 for external resolution
+#   6. Join Token          — write to /vagrant for workers to consume
+# =============================================================================
+- name: Bootstrap Kubernetes Control Plane
+  hosts: all
+  connection: local
+  become: true
+  vars:
+    k8s_version: "1.30"
+    pod_network_cidr: "192.168.0.0/16"
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # 1. SYSTEM PREPARATION
+    # -------------------------------------------------------------------------
+    - name: Disable swap permanently
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\s+swap\s+.*)$'
+        replace: '# \1'
+
+    - name: Disable swap in the running session
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+
+    - name: Persist kernel modules for K8s
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        mode: "0644"
+
+    - name: Load kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Configure sysctl for K8s networking
+      ansible.posix.sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        sysctl_file: /etc/sysctl.d/k8s.conf
+        reload: true
+      loop:
+        - { name: 'net.bridge.bridge-nf-call-iptables',  value: '1' }
+        - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+        - { name: 'net.ipv4.ip_forward',                 value: '1' }
+
+    # -------------------------------------------------------------------------
+    # 2. CONTAINER RUNTIME (containerd)
+    # -------------------------------------------------------------------------
+    - name: Install containerd
+      ansible.builtin.apt:
+        name: containerd
+        state: present
+        update_cache: true
+
+    - name: Generate default containerd configuration
+      ansible.builtin.shell: |
+        mkdir -p /etc/containerd
+        containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+
+    - name: Enable SystemdCgroup in containerd
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+
+    - name: Enable and restart containerd
+      ansible.builtin.service:
+        name: containerd
+        state: restarted
+        enabled: true
+
+    # -------------------------------------------------------------------------
+    # 3. KUBERNETES PACKAGES
+    # -------------------------------------------------------------------------
+    - name: Install apt transport dependencies
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gpg
+        state: present
+        update_cache: true
+
+    - name: Add Kubernetes GPG key
+      ansible.builtin.shell: |
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/Release.key \
+          | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg --yes
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add Kubernetes apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v{{ k8s_version }}/deb/ /"
+        filename: kubernetes
+        state: present
+
+    - name: Install kubelet, kubeadm, kubectl
+      ansible.builtin.apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: true
+
+    - name: Hold K8s packages at current version
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    # -------------------------------------------------------------------------
+    # 4. CLUSTER INITIALIZATION
+    # -------------------------------------------------------------------------
+    - name: Initialize the control plane
+      ansible.builtin.command: >
+        kubeadm init
+        --apiserver-advertise-address=192.168.242.10
+        --pod-network-cidr={{ pod_network_cidr }}
+        --ignore-preflight-errors=NumCPU
+      args:
+        creates: /etc/kubernetes/admin.conf
+
+    - name: Create .kube directory for vagrant user
+      ansible.builtin.file:
+        path: /home/vagrant/.kube
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: "0755"
+
+    - name: Copy admin.conf to vagrant user kubeconfig
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/vagrant/.kube/config
+        remote_src: true
+        owner: vagrant
+        group: vagrant
+        mode: "0600"
+        force: false
+
+    - name: Install Calico operator
+      become_user: vagrant
+      ansible.builtin.command: >
+        kubectl create -f
+        https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/tigera-operator.yaml
+      register: calico_operator
+      failed_when:
+        - calico_operator.rc != 0
+        - '"already exists" not in calico_operator.stderr'
+      changed_when: calico_operator.rc == 0
+
+    - name: Install Calico custom resources
+      become_user: vagrant
+      ansible.builtin.command: >
+        kubectl create -f
+        https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/custom-resources.yaml
+      register: calico_cr
+      failed_when:
+        - calico_cr.rc != 0
+        - '"already exists" not in calico_cr.stderr'
+      changed_when: calico_cr.rc == 0
+
+    - name: Wait for Calico node pods to be ready
+      become_user: vagrant
+      ansible.builtin.command: >
+        kubectl wait --for=condition=ready pod
+        -l k8s-app=calico-node -n calico-system --timeout=300s
+      retries: 3
+      delay: 15
+      register: calico_wait
+      until: calico_wait.rc == 0
+
+    # -------------------------------------------------------------------------
+    # 5. COREDNS — forward external queries to public DNS
+    # -------------------------------------------------------------------------
+    - name: Patch CoreDNS ConfigMap to use public forwarders
+      become_user: vagrant
+      ansible.builtin.shell: |
+        kubectl apply -f - <<'EOF'
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: coredns
+          namespace: kube-system
+        data:
+          Corefile: |
+            .:53 {
+                errors
+                health {
+                   lameduck 5s
+                }
+                ready
+                kubernetes cluster.local in-addr.arpa ip6.arpa {
+                   pods insecure
+                   fallthrough in-addr.arpa ip6.arpa
+                   ttl 30
+                }
+                prometheus :9153
+                forward . 8.8.8.8 8.8.4.4 {
+                   max_concurrent 1000
+                }
+                cache 30
+                loop
+                reload
+                loadbalance
+            }
+        EOF
+      changed_when: true
+
+    - name: Restart CoreDNS deployment
+      become_user: vagrant
+      ansible.builtin.command: kubectl -n kube-system rollout restart deployment coredns
+      changed_when: true
+
+    - name: Wait for CoreDNS rollout to complete
+      become_user: vagrant
+      ansible.builtin.command: >
+        kubectl -n kube-system rollout status deployment coredns --timeout=60s
+
+    # -------------------------------------------------------------------------
+    # 6. KUBEADM JOIN COMMAND — written to shared /vagrant for workers
+    # -------------------------------------------------------------------------
+    - name: Generate kubeadm join command
+      ansible.builtin.command: kubeadm token create --print-join-command
+      register: join_command
+      changed_when: false
+
+    - name: Write join command to shared Vagrant folder
+      ansible.builtin.copy:
+        content: "{{ join_command.stdout }}"
+        dest: /vagrant/k8s-join-command.sh
+        mode: "0755"
+
+    - name: Print next-step instructions
+      ansible.builtin.debug:
+        msg:
+          - "=============================================="
+          - "  Phase 1 complete: control plane is ready."
+          - "  Next: vagrant up k8s-worker-1 k8s-worker-2"
+          - "  Then: vagrant provision k8s-master --provision-with argocd"
+          - "=============================================="

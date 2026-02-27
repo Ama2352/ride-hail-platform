@@ -1,0 +1,45 @@
+﻿# --- Vagrant runtime state ---
+# Contains VM disk images, private SSH keys, box metadata
+.vagrant/
+
+# kubeadm join token + CA cert hash -- treat as a secret
+# Written by playbook_master.yml to /vagrant/ (synced folder lands here too)
+k8s-join-command.sh
+
+# --- Ansible runtime artifacts ---
+# Created automatically when a play fails (lists hosts to retry)
+*.retry
+# Downloaded Galaxy roles/collections (restored via ansible-galaxy install)
+ansible/roles/
+ansible/collections/
+
+# --- Kubernetes credentials ---
+# Guard against accidentally copying kubeconfig/admin.conf into the repo
+kubeconfig
+*.kubeconfig
+admin.conf
+
+# --- TLS / SSH private key material ---
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# --- Ansible Vault password files ---
+.vault_pass
+.vault_pass.txt
+vault-password*
+
+# --- Environment / secret files ---
+.env
+.env.*
+*.secret
+
+# --- OS noise ---
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~

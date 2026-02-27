@@ -1,0 +1,116 @@
+---
+# =============================================================================
+# playbook_argocd.yml
+# Phase 2 of 2: Bootstraps ArgoCD onto the running cluster.
+#
+# WHY THIS IS A SEPARATE PLAYBOOK (Engineering Integrity):
+#   ArgoCD is a workload. Workloads belong on worker nodes. Worker nodes must
+#   exist before workloads can be scheduled. Therefore, this playbook must run
+#   AFTER playbook_worker.yml has completed on all workers. Running it here
+#   requires no Tolerations, no taint removal — the K8s scheduler places pods
+#   naturally on whichever worker has available resources.
+#
+# Trigger (from host):
+#   vagrant provision k8s-master --provision-with argocd
+#
+# Sections:
+#   1. Pre-flight  — fast check: at least one worker is Ready (trigger ensures this)
+#   2. Namespace   — create argocd namespace (idempotent)
+#   3. Install     — apply upstream install manifest (server-side apply)
+#   4. Expose      — patch argocd-server service to NodePort
+#   5. Verify      — wait for argocd-server deployment to be available
+# =============================================================================
+- name: Bootstrap ArgoCD (Phase 2 — requires workers to be joined)
+  hosts: all
+  connection: local
+  become: false
+  become_user: vagrant
+  vars:
+    argocd_version: "stable"   # pin to a tag e.g. v2.11.0 for reproducibility
+    argocd_nodeport: 30080
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # 1. PRE-FLIGHT — verify at least one worker node is Ready.
+    # -------------------------------------------------------------------------
+    - name: Count Ready worker nodes
+      ansible.builtin.shell: |
+        kubectl get nodes \
+          --selector='!node-role.kubernetes.io/control-plane' \
+          --no-headers 2>/dev/null | grep -c 'Ready' || true
+      register: worker_count
+      changed_when: false
+
+    - name: Fail if no workers are Ready
+      ansible.builtin.fail:
+        msg: >
+          Pre-flight failed: no Ready worker nodes found.
+          Ensure k8s-worker-1 and k8s-worker-2 have finished provisioning
+          before running this playbook.
+      when: worker_count.stdout | int == 0
+
+    - name: Show Ready worker count
+      ansible.builtin.debug:
+        msg: "Pre-flight passed: {{ worker_count.stdout | trim }} Ready worker node(s) found."
+
+    # -------------------------------------------------------------------------
+    # 2. NAMESPACE
+    # -------------------------------------------------------------------------
+    - name: Create argocd namespace (idempotent)
+      ansible.builtin.shell: |
+        kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
+      changed_when: true
+
+    # -------------------------------------------------------------------------
+    # 3. INSTALL
+    # Server-side apply avoids the 262144-byte annotation limit that
+    # kubectl apply (client-side) hits on large CRDs like applicationsets.
+    # -------------------------------------------------------------------------
+    - name: Install ArgoCD
+      ansible.builtin.command: >
+        kubectl apply -n argocd --server-side --force-conflicts
+        -f https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
+      register: argocd_install
+      changed_when: '"configured" in argocd_install.stdout or "created" in argocd_install.stdout'
+
+    # -------------------------------------------------------------------------
+    # 4. EXPOSE — NodePort so the UI is reachable from the host network
+    # -------------------------------------------------------------------------
+    - name: Expose ArgoCD server as NodePort {{ argocd_nodeport }}
+      ansible.builtin.shell: |
+        kubectl patch svc argocd-server -n argocd \
+          -p '{"spec":{"type":"NodePort","ports":[{"port":443,"targetPort":8080,"nodePort":{{ argocd_nodeport }}}]}}'
+      changed_when: true
+
+    # -------------------------------------------------------------------------
+    # 5. VERIFY
+    # -------------------------------------------------------------------------
+    - name: Wait for ArgoCD server deployment to be available
+      ansible.builtin.command: >
+        kubectl wait --for=condition=available deployment argocd-server
+        -n argocd --timeout=300s
+      retries: 3
+      delay: 20
+      register: argocd_ready
+      until: argocd_ready.rc == 0
+
+    - name: Show ArgoCD pod placement (confirms worker scheduling)
+      ansible.builtin.command: kubectl get pods -n argocd -o wide
+      register: argocd_pods
+      changed_when: false
+
+    - name: Print pod placement
+      ansible.builtin.debug:
+        var: argocd_pods.stdout_lines
+
+    - name: Print ArgoCD access information
+      ansible.builtin.debug:
+        msg:
+          - "=============================================="
+          - "  ArgoCD is ready!"
+          - "  URL:  https://192.168.242.10:{{ argocd_nodeport }}"
+          - "  User: admin"
+          - "  Pass: kubectl get secret argocd-initial-admin-secret \\"
+          - "          -n argocd -o jsonpath='{.data.password}' | base64 -d"
+          - "=============================================="
