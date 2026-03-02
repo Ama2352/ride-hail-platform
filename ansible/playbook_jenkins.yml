@@ -1,21 +1,10 @@
 ---
-# =============================================================================
 # playbook_jenkins.yml
-# Installs Docker and runs Jenkins controller as a persistent container.
+# Installs Docker and runs Jenkins controller as a persistent container (DooD).
 #
-# Architecture: DooD (Docker-outside-of-Docker)
-#   - Jenkins container mounts /var/run/docker.sock so it can spawn
-#     sibling CI agent containers on the same host Docker daemon.
-#   - JENKINS_HOME path is identical on host AND inside the container
-#     (/data/jenkins) so Docker path resolution works correctly when
-#     pipelines mount workspace directories into sibling containers.
-#
-# Sections:
-#   1. Docker Install        — official Docker CE repository
-#   2. Docker Post-Install   — add vagrant user to docker group
-#   3. Jenkins Preparation   — create persistent data directory
-#   4. Jenkins Container     — pull image + run with DooD config
-# =============================================================================
+# JENKINS_HOME is /data/jenkins on both the host and inside the container
+# so Docker path resolution works correctly when pipelines mount workspace
+# directories into sibling containers.
 - name: Install Docker and Run Jenkins Controller
   hosts: all
   connection: local
@@ -154,5 +143,5 @@
           - "  URL:  http://192.168.242.13:{{ jenkins_port }}"
           - "  Initial unlock key:"
           - "    docker exec {{ jenkins_container }}"
-          - "      cat /var/jenkins_home/secrets/initialAdminPassword"
+          - "      cat {{ jenkins_home }}/secrets/initialAdminPassword"
           - "=============================================="

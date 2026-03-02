@@ -1,18 +1,8 @@
 ---
-# =============================================================================
 # playbook_master.yml
 # Phase 1 of 2: Configures the Kubernetes control plane.
 # ArgoCD is NOT installed here — it runs in Phase 2 (playbook_argocd.yml)
-# after workers have joined, so the scheduler can place pods on workers.
-#
-# Sections:
-#   1. System Preparation  — swap, kernel modules, sysctl
-#   2. Container Runtime   — containerd + SystemdCgroup
-#   3. Kubernetes Packages — kubelet, kubeadm, kubectl (held at v1.30)
-#   4. Cluster Init        — kubeadm init, kubeconfig, Calico CNI
-#   5. CoreDNS Fix         — forward to 8.8.8.8 for external resolution
-#   6. Join Token          — write to /vagrant for workers to consume
-# =============================================================================
+# after workers have joined so the scheduler can place pods on workers.
 - name: Bootstrap Kubernetes Control Plane
   hosts: all
   connection: local
@@ -247,7 +237,7 @@
         kubectl -n kube-system rollout status deployment coredns --timeout=60s
 
     # -------------------------------------------------------------------------
-    # 6. KUBEADM JOIN COMMAND — written to shared /vagrant for workers
+    # 6. KUBEADM JOIN COMMAND — written to /vagrant for workers to consume
     # -------------------------------------------------------------------------
     - name: Generate kubeadm join command
       ansible.builtin.command: kubeadm token create --print-join-command

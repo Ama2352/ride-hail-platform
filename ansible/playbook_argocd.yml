@@ -1,25 +1,10 @@
 ---
-# =============================================================================
 # playbook_argocd.yml
 # Phase 2 of 2: Bootstraps ArgoCD onto the running cluster.
+# Must run AFTER all workers have joined (ArgoCD pods are scheduled on workers).
 #
-# WHY THIS IS A SEPARATE PLAYBOOK (Engineering Integrity):
-#   ArgoCD is a workload. Workloads belong on worker nodes. Worker nodes must
-#   exist before workloads can be scheduled. Therefore, this playbook must run
-#   AFTER playbook_worker.yml has completed on all workers. Running it here
-#   requires no Tolerations, no taint removal — the K8s scheduler places pods
-#   naturally on whichever worker has available resources.
-#
-# Trigger (from host):
+# Trigger:
 #   vagrant provision k8s-master --provision-with argocd
-#
-# Sections:
-#   1. Pre-flight  — fast check: at least one worker is Ready (trigger ensures this)
-#   2. Namespace   — create argocd namespace (idempotent)
-#   3. Install     — apply upstream install manifest (server-side apply)
-#   4. Expose      — patch argocd-server service to NodePort
-#   5. Verify      — wait for argocd-server deployment to be available
-# =============================================================================
 - name: Bootstrap ArgoCD (Phase 2 — requires workers to be joined)
   hosts: all
   connection: local
@@ -64,8 +49,7 @@
 
     # -------------------------------------------------------------------------
     # 3. INSTALL
-    # Server-side apply avoids the 262144-byte annotation limit that
-    # kubectl apply (client-side) hits on large CRDs like applicationsets.
+    # Server-side apply avoids the 262144-byte annotation limit on large CRDs.
     # -------------------------------------------------------------------------
     - name: Install ArgoCD
       ansible.builtin.command: >

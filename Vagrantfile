@@ -8,13 +8,6 @@
 # k8s-worker-1  192.168.242.11  3072 MB  2 vCPU  SonarQube + Prometheus + Grafana
 # k8s-worker-2  192.168.242.12  2048 MB  2 vCPU  App workloads + Istio sidecars
 # jenkins-vm    192.168.242.13  3072 MB  2 vCPU  Jenkins controller (DooD)
-#
-# Provisioning strategy:
-#   - All configuration is driven by Ansible playbooks in ansible/.
-#   - Workers/Jenkins: a minimal shell step installs Ansible first, then
-#     ansible_local runs the appropriate playbook.
-#   - The /vagrant synced folder is the bridge for the kubeadm join command
-#     written by the master and consumed by the workers.
 # =============================================================================
 
 ANSIBLE_INSTALL = <<~SHELL

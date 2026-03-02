@@ -1,17 +1,8 @@
 ---
-# =============================================================================
 # playbook_worker.yml
 # Prepares the OS and joins the node to the existing K8s cluster.
-#
-# Sections:
-#   1. System Preparation  — swap, kernel modules, sysctl  (identical to master)
-#   2. Container Runtime   — containerd + SystemdCgroup
-#   3. Kubernetes Packages — kubelet, kubeadm, kubectl (held at v1.30)
-#   4. Cluster Join        — reads join command from /vagrant (written by master)
-#
-# Prerequisites: k8s-master must have finished provisioning so that
+# Prerequisite: k8s-master must have finished provisioning so that
 # /vagrant/k8s-join-command.sh exists in the shared Vagrant folder.
-# =============================================================================
 - name: Prepare Worker Node and Join K8s Cluster
   hosts: all
   connection: local
@@ -137,8 +128,7 @@
 
     # -------------------------------------------------------------------------
     # 4. CLUSTER JOIN
-    # The master writes the token + CA hash to /vagrant/k8s-join-command.sh.
-    # The Vagrant synced folder makes this file available on all worker VMs.
+    # The master writes the join token to /vagrant/k8s-join-command.sh.
     # The 'creates' guard ensures the join is idempotent.
     # -------------------------------------------------------------------------
     - name: Check that join command file exists
