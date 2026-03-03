@@ -3,6 +3,9 @@
 # Phase 2 of 2: Bootstraps ArgoCD onto the running cluster.
 # Must run AFTER all workers have joined (ArgoCD pods are scheduled on workers).
 #
+# Pinned to v2.x — ArgoCD v3.x init container uses 'cp --update=none' which
+# requires GNU coreutils >= 9.1. Ubuntu 22.04 ships coreutils 8.32 (incompatible).
+#
 # Trigger:
 #   vagrant provision k8s-master --provision-with argocd
 - name: Bootstrap ArgoCD (Phase 2 — requires workers to be joined)
@@ -11,7 +14,7 @@
   become: false
   become_user: vagrant
   vars:
-    argocd_version: "stable"   # pin to a tag e.g. v2.11.0 for reproducibility
+    argocd_version: "v2.14.9"   # v3.x incompatible with Ubuntu 22.04 coreutils 8.32
     argocd_nodeport: 30080
 
   tasks:
@@ -97,4 +100,25 @@
           - "  User: admin"
           - "  Pass: kubectl get secret argocd-initial-admin-secret \\"
           - "          -n argocd -o jsonpath='{.data.password}' | base64 -d"
+          - "=============================================="
+
+    # -------------------------------------------------------------------------
+    # 6. GITOPS BOOTSTRAP — apply root-app.yaml from ride-hail-gitops
+    # Fetched directly from GitHub; no synced-folder dependency.
+    # This registers the App of Apps and triggers full cluster reconciliation.
+    # -------------------------------------------------------------------------
+    - name: Apply GitOps root app (App of Apps)
+      ansible.builtin.command: >
+        kubectl apply -n argocd
+        -f https://raw.githubusercontent.com/ama2352/ride-hail-gitops/main/root-app.yaml
+      register: root_app
+      changed_when: '"configured" in root_app.stdout or "created" in root_app.stdout'
+
+    - name: Print GitOps bootstrap result
+      ansible.builtin.debug:
+        msg:
+          - "=============================================="
+          - "  GitOps root app applied: {{ root_app.stdout | trim }}"
+          - "  ArgoCD will now reconcile the full platform."
+          - "  Watch progress: https://192.168.242.10:{{ argocd_nodeport }}"
           - "=============================================="

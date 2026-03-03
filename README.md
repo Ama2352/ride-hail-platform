@@ -116,6 +116,7 @@ Open `http://192.168.242.13:8080` in your browser.
 | `ansible_local` for all VMs | Avoids host-side Ansible dependency; VM provisions itself |
 | Vagrant synced folder as join-command bridge | Zero-config worker join without SSH key sharing |
 | ArgoCD in Phase 2 (separate playbook) | Workers must exist first — ArgoCD is a workload, not a control-plane component |
+| ArgoCD pinned to v2.x | v3.x init container uses `cp --update=none` (requires coreutils ≥ 9.1); Ubuntu 22.04 ships coreutils 8.32 |
 | Pre-flight check in playbook_argocd.yml | Enforces correct sequencing; fails fast with a clear error if workers aren't Ready |
 | No taint removal, no tolerations for ArgoCD | Standard scheduler placement on workers; control-plane protection remains intact |
 | DooD for Jenkins CI | Sibling containers share the host Docker daemon; avoids DinD privilege risks |
