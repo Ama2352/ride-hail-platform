@@ -1,38 +1,38 @@
-# ride-hail-platform
+# ride-hail-platform (Repo 1 of 3)
 
-> **Repo 1 of 3** in the ride-hail GitOps architecture.
-> Scope: Hardware provisioning, OS configuration, Kubernetes cluster bootstrap, and ArgoCD installation.
-
----
-
-## Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────┐
-│          ride-hail-platform  (this repo)                │
-│  Vagrant + Ansible → K8s Cluster + ArgoCD               │
-└──────────────────────┬──────────────────────────────────┘
-                       │ ArgoCD watches ↓
-┌──────────────────────▼──────────────────────────────────┐
-│          ride-hail-gitops  (Repo 3)                     │
-│  Helm/Kustomize manifests — the desired cluster state   │
-└──────────────────────┬──────────────────────────────────┘
-                       │ Images built by ↓
-┌──────────────────────▼──────────────────────────────────┐
-│          ride-hail-services  (Repo 2)                   │
-│  Go source code + Jenkins CI pipelines                  │
-└─────────────────────────────────────────────────────────┘
-```
+> Infrastructure, K8s cluster bootstrap, and ArgoCD installation.
+> Part of a 3-repo GitOps architecture governed by `Global_Principles.md`.
 
 ---
 
-## VM Topology (10 GB RAM Total)
+## Architecture Position
+
+```
+┌─────────────────────┐     ┌──────────────────────┐     ┌─────────────────────┐
+│  ride-hail-platform │     │  ride-hail-services  │     │  ride-hail-gitops   │
+│  >>> THIS REPO <<<  │     │      (Repo 2)        │     │      (Repo 3)       │
+│                     │     │                      │     │                     │
+│  Vagrant, Ansible,  │     │  Go source code,     │     │  K8s manifests,     │
+│  K8s bootstrap,     │     │  Dockerfiles,        │     │  Helm values,       │
+│  ArgoCD install     │     │  Jenkinsfile (CI)    │     │  ArgoCD App defs    │
+└─────────────────────┘     └──────────┬───────────┘     └──────────▲──────────┘
+                                       │  git commit image tag      │
+                                       └───────────────────────────►┘
+                                              ArgoCD reconciles
+```
+
+No `kubectl apply` or `helm install` is ever run manually after Day 0.
+All cluster state flows through git commits to `ride-hail-gitops`.
+
+---
+
+## VM Topology (11 GB RAM Total)
 
 | VM | IP | RAM | vCPU | Role |
 |---|---|---|---|---|
 | `k8s-master` | 192.168.242.10 | 2 GB | 2 | Control plane, CoreDNS, Calico, **ArgoCD** |
 | `k8s-worker-1` | 192.168.242.11 | 3 GB | 2 | SonarQube · Prometheus · Grafana |
-| `k8s-worker-2` | 192.168.242.12 | 2 GB | 2 | App workloads · Istio sidecars |
+| `k8s-worker-2` | 192.168.242.12 | 3 GB | 2 | App workloads · Istio sidecars |
 | `jenkins-vm` | 192.168.242.13 | 3 GB | 2 | Jenkins controller · Docker CI (DooD) |
 
 Provider: `vmware_desktop` · Base box: `bento/ubuntu-22.04` · Network: `192.168.242.0/24`
@@ -124,9 +124,9 @@ Open `http://192.168.242.13:8080` in your browser.
 
 ---
 
-## Global Principles (Summary)
+## Global Principles
 
 1. **Declarative** — Every state is described in Git. No manual `kubectl` or ad-hoc `sh` for final cluster state.
-2. **Repo Separation** — This repo owns only hardware and platform bootstrap.
+2. **Repo Separation** — Each repo owns a single concern: infrastructure, code, or desired state.
 3. **Pull-Based CD** — Jenkins pushes images; ArgoCD pulls manifests from Repo 3.
 4. **Folders > Branches** — Environment differences are directory overlays in Repo 3.

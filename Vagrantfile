@@ -2,11 +2,11 @@
 # vi: set ft=ruby :
 
 # =============================================================================
-# ride-hail-platform — VM Topology (Total: 10 GB RAM)
+# ride-hail-platform — VM Topology (Total: 11 GB RAM)
 #
 # k8s-master    192.168.242.10  2048 MB  2 vCPU  Control plane + ArgoCD
 # k8s-worker-1  192.168.242.11  3072 MB  2 vCPU  SonarQube + Prometheus + Grafana
-# k8s-worker-2  192.168.242.12  2048 MB  2 vCPU  App workloads + Istio sidecars
+# k8s-worker-2  192.168.242.12  3072 MB  2 vCPU  App workloads + Istio sidecars
 # jenkins-vm    192.168.242.13  3072 MB  2 vCPU  Jenkins controller (DooD)
 # =============================================================================
 
@@ -86,7 +86,7 @@ Vagrant.configure("2") do |config|
     worker.vm.network "private_network", ip: "192.168.242.12"
 
     worker.vm.provider "vmware_desktop" do |v|
-      v.vmx["memsize"]  = "2048"
+      v.vmx["memsize"]  = "3072"
       v.vmx["numvcpus"] = "2"
     end
 
