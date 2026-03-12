@@ -190,54 +190,7 @@
       until: calico_wait.rc == 0
 
     # -------------------------------------------------------------------------
-    # 5. COREDNS — forward external queries to public DNS
-    # -------------------------------------------------------------------------
-    - name: Patch CoreDNS ConfigMap to use public forwarders
-      become_user: vagrant
-      ansible.builtin.shell: |
-        kubectl apply -f - <<'EOF'
-        apiVersion: v1
-        kind: ConfigMap
-        metadata:
-          name: coredns
-          namespace: kube-system
-        data:
-          Corefile: |
-            .:53 {
-                errors
-                health {
-                   lameduck 5s
-                }
-                ready
-                kubernetes cluster.local in-addr.arpa ip6.arpa {
-                   pods insecure
-                   fallthrough in-addr.arpa ip6.arpa
-                   ttl 30
-                }
-                prometheus :9153
-                forward . 8.8.8.8 8.8.4.4 {
-                   max_concurrent 1000
-                }
-                cache 30
-                loop
-                reload
-                loadbalance
-            }
-        EOF
-      changed_when: true
-
-    - name: Restart CoreDNS deployment
-      become_user: vagrant
-      ansible.builtin.command: kubectl -n kube-system rollout restart deployment coredns
-      changed_when: true
-
-    - name: Wait for CoreDNS rollout to complete
-      become_user: vagrant
-      ansible.builtin.command: >
-        kubectl -n kube-system rollout status deployment coredns --timeout=60s
-
-    # -------------------------------------------------------------------------
-    # 6. KUBEADM JOIN COMMAND — written to /vagrant for workers to consume
+    # 5. KUBEADM JOIN COMMAND — written to /vagrant for workers to consume
     # -------------------------------------------------------------------------
     - name: Generate kubeadm join command
       ansible.builtin.command: kubeadm token create --print-join-command
