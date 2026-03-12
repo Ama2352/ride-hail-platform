@@ -190,6 +190,37 @@
       until: calico_wait.rc == 0
 
     # -------------------------------------------------------------------------
+    # FIX COREDNS UPSTREAM DNS
+    # Ubuntu 22.04 systemd-resolved sets /etc/resolv.conf to 127.0.0.53 (loopback).
+    # CoreDNS forwards to that address, but it is unreachable from inside the
+    # pod network — causing SERVFAIL / "server misbehaving" for all external
+    # lookups (e.g. github.com). Patch the ConfigMap to use explicit public
+    # resolvers instead of /etc/resolv.conf.
+    # -------------------------------------------------------------------------
+    - name: Patch CoreDNS ConfigMap to use public DNS forwarders
+      become_user: vagrant
+      ansible.builtin.shell: |
+        kubectl get configmap coredns -n kube-system -o yaml \
+          | sed 's|forward \. /etc/resolv.conf|forward . 8.8.8.8 1.1.1.1|g' \
+          | kubectl apply -f -
+      changed_when: true
+
+    - name: Restart CoreDNS to pick up the new ConfigMap
+      become_user: vagrant
+      ansible.builtin.command: >
+        kubectl rollout restart deployment/coredns -n kube-system
+      changed_when: true
+
+    - name: Wait for CoreDNS rollout to complete
+      become_user: vagrant
+      ansible.builtin.command: >
+        kubectl rollout status deployment/coredns -n kube-system --timeout=120s
+      register: coredns_rollout
+      retries: 3
+      delay: 10
+      until: coredns_rollout.rc == 0
+
+    # -------------------------------------------------------------------------
     # 5. KUBEADM JOIN COMMAND — written to /vagrant for workers to consume
     # -------------------------------------------------------------------------
     - name: Generate kubeadm join command
