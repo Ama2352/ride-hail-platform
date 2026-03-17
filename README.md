@@ -1,140 +1,63 @@
-# ride-hail-platform
+# ride-hail-platform (Repo 1 of 3)
 
-> Infrastructure provisioning, Kubernetes bootstrap, and ArgoCD installation.
-> Repo 1 of 3 in a GitOps architecture: platform -> services -> gitops.
-
-No manual kubectl or helm operations are required after Day 0.
-Cluster desired state is reconciled from the gitops repository by ArgoCD.
+> Infrastructure provisioning, Kubernetes bootstrap, and ArgoCD installation for the Ride-Hailing platform.
 
 ---
 
-## Architecture Overview
+## 🔗 Related Repositories
+- **ride-hail-platform** (Repo 1 - You are here)
+- [ride-hail-services](https://github.com/ama2352/ride-hail-services) (Repo 2 - Application Source)
+- [ride-hail-gitops](https://github.com/ama2352/ride-hail-gitops) (Repo 3 - K8s Manifests & App Config)
+
+---
+
+## 🏛️ Architecture Overview
+
+This repository uses Vagrant and Ansible to create a local Multi-Node Kubernetes development cluster natively, establishing the foundation of the GitOps rollout. 
 
 ```text
-ride-hail-platform (this repo)
-  -> creates VMs and bootstraps Kubernetes + ArgoCD
-ride-hail-services
-  -> builds/scans/pushes images with GitLab CI
-ride-hail-gitops
-  -> stores manifests/overlays watched by ArgoCD
+┌─────────────────────┐     ┌──────────────────────┐     ┌─────────────────────┐
+│  ride-hail-platform │     │  ride-hail-services  │     │  ride-hail-gitops   │
+│  >>> THIS REPO <<<  │     │      (Repo 2)        │     │      (Repo 3)       │
+│                     │     │                      │     │                     │
+│  Vagrant, Ansible,  │     │  Go source code,     │     │  K8s manifests,     │
+│  K8s bootstrap,     │     │  Dockerfiles,        │     │  Helm values,       │
+│  ArgoCD install     │     │  Jenkins & GitLab CI │     │  ArgoCD App defs    │
+└─────────────────────┘     └──────────┬───────────┘     └──────────▲──────────┘
+                                       │  git commit image tag      │
+                                       └───────────────────────────►┘
+                                              ArgoCD reconciles
 ```
 
 ---
 
-## VM Topology
+## 🚀 Dual-CI Workflows
 
-| VM | IP | RAM | vCPU | Role |
-|---|---|---:|---:|---|
-| k8s-master | 192.168.242.10 | 2 GB | 2 | Kubernetes control plane + ArgoCD |
-| k8s-worker-1 | 192.168.242.11 | 3 GB | 2 | SonarQube, Prometheus, Grafana |
-| k8s-worker-2 | 192.168.242.12 | 3 GB | 2 | Application workloads + Istio sidecars |
-| jenkins-vm | 192.168.242.13 | 3 GB | 2 | Legacy Jenkins controller (DooD) |
+The platform seamlessly integrates with dual CI engines deployed externally or locally:
 
-Provider: vmware_desktop  
-Base box: bento/ubuntu-22.04  
-Network: 192.168.242.0/24
+- **Jenkins Workflow:** Provided as a legacy path, where code changes trigger Jenkins pipelines that build and update `ride-hail-gitops`, triggering ArgoCD synchronization. 
+- **GitLab CI Workflow:** Modern, native pipeline defining a `build->scan->push->gitops` lifecycle via GitLab runners, committing updates to `ride-hail-gitops`.
+
+In both workflows, ArgoCD (installed by this platform) remains the sole authoritative engine handling Continuous Deployment (CD).
 
 ---
 
-## Repository Structure
+## ⚙️ Setup Guide (Fresh Environment)
 
-```text
-ride-hail-platform/
-  Vagrantfile
-  k8s-join-command.sh
-  run-sonarqube-ngrok.ps1
-  ansible/
-    inventory.ini
-    playbook_master.yml
-    playbook_worker.yml
-    playbook_jenkins.yml
-    playbook_argocd.yml
-    playbook_ngrok_sonarqube.yml
-```
-
----
-
-## Quick Start
-
-### Prerequisites
+### Prerequisites:
 - Vagrant >= 2.3
-- VMware Desktop + vagrant-vmware-desktop plugin
-- At least 12 GB free RAM on host
+- VMware Desktop + `vagrant-vmware-desktop` plugin
+- ~12 GB free RAM on host
 
-### Provision Everything
-
-```bash
-vagrant up
-```
-
-This runs:
-1. `playbook_master.yml` on k8s-master
-2. `playbook_worker.yml` on both workers
-3. Triggered `playbook_argocd.yml` after the second worker joins
-4. `playbook_jenkins.yml` on jenkins-vm
-
-### Re-run ArgoCD Only
-
-```bash
-vagrant provision k8s-master --provision-with argocd
-```
-
----
-
-## Access Endpoints
-
-| Component | URL |
-|---|---|
-| ArgoCD | https://192.168.242.10:30080 |
-| SonarQube | http://192.168.242.11:30090 |
-| Grafana | http://192.168.242.11:30300 |
-| Prometheus | http://192.168.242.11:30909 |
-| Jenkins (legacy) | http://192.168.242.13:8080 |
-
----
-
-## SonarQube ngrok Tunnel (Clean, Explicit Flow)
-
-This repo now includes an optional Ansible provisioner that deploys an ngrok pod in Kubernetes and tunnels to SonarQube service (`sonarqube-sonarqube.sonarqube.svc.cluster.local:9000`).
-
-### Option A: One-command helper script (Windows PowerShell)
-
-```powershell
-cd ride-hail-platform
-.\run-sonarqube-ngrok.ps1 -NgrokAuthtoken "<YOUR_NGROK_AUTHTOKEN>"
-```
-
-The script explicitly runs and prints:
-1. setting `NGROK_AUTHTOKEN`
-2. `vagrant provision k8s-master --provision-with ngrok-sonarqube`
-3. ngrok pod logs
-4. extracted tunnel URL
-
-### Option B: Manual explicit commands
-
-```powershell
-cd ride-hail-platform
-$env:NGROK_AUTHTOKEN="<YOUR_NGROK_AUTHTOKEN>"
-vagrant provision k8s-master --provision-with ngrok-sonarqube
-vagrant ssh k8s-master -c "kubectl -n ngrok logs deploy/ngrok-sonarqube --tail=100"
-```
-
-### What gets created
-- Namespace: `ngrok`
-- Secret: `ngrok-authtoken`
-- Deployment: `ngrok-sonarqube`
-
-### Remove the tunnel
-
-```bash
-vagrant ssh k8s-master -c "kubectl delete namespace ngrok"
-```
-
----
-
-## Global Principles
-
-1. Declarative: cluster state is defined in git.
-2. Repo Separation: infra, app code, and desired state are separated.
-3. Pull-Based CD: GitLab CI pushes images, ArgoCD pulls manifests.
-4. Folders over Branches: environment differences live in overlays.
+### Initialization:
+1. Clone this repository.
+2. Initialize the platform infrastructure:
+   ```bash
+   vagrant up
+   ```
+3. Once provisioning resolves, ArgoCD is natively bootstrapped and immediately begins resolving applications from `ride-hail-gitops`. You can access clusters natively:
+   - **ArgoCD:** `https://192.168.242.10:30080`
+   - **Grafana:** `http://192.168.242.11:30300`
+   - **Jenkins:** `http://192.168.242.13:8080`
+   
+*(To reboot ArgoCD without tearing down VMs)*: Wait until vagrant resolves then use `vagrant provision k8s-master --provision-with argocd`.
