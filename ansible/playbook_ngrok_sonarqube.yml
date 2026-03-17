@@ -1,0 +1,183 @@
+---
+# playbook_ngrok_sonarqube.yml
+# Installs ngrok on k8s-master and creates helper scripts to expose SonarQube.
+# Usage from host:
+#   vagrant provision k8s-master --provision-with ngrok-sonarqube
+# Usage inside VM:
+#   sonarqube-ngrok start [NGROK_AUTHTOKEN]
+#   sonarqube-ngrok status
+#   sonarqube-ngrok stop
+- name: Install ngrok and SonarQube tunnel helper
+  hosts: all
+  connection: local
+  become: true
+  vars:
+    ngrok_version: "3.18.4"
+    ngrok_zip_url: "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.zip"
+    ngrok_zip_path: "/tmp/ngrok-v3-stable-linux-amd64.zip"
+    ngrok_bin_path: "/usr/local/bin/ngrok"
+    sonar_url: "http://192.168.242.11:30090"
+    ngrok_authtoken: "{{ lookup('env', 'NGROK_AUTHTOKEN') }}"
+
+  tasks:
+    - name: Install OS dependencies
+      ansible.builtin.apt:
+        name:
+          - unzip
+          - curl
+          - jq
+        state: present
+        update_cache: true
+
+    - name: Check if ngrok is already installed
+      ansible.builtin.stat:
+        path: "{{ ngrok_bin_path }}"
+      register: ngrok_bin
+
+    - name: Download ngrok archive
+      ansible.builtin.get_url:
+        url: "{{ ngrok_zip_url }}"
+        dest: "{{ ngrok_zip_path }}"
+        mode: "0644"
+      when: not ngrok_bin.stat.exists
+
+    - name: Install ngrok binary
+      ansible.builtin.unarchive:
+        src: "{{ ngrok_zip_path }}"
+        dest: "/usr/local/bin"
+        remote_src: true
+        mode: "0755"
+      when: not ngrok_bin.stat.exists
+
+    - name: Ensure ngrok binary permissions
+      ansible.builtin.file:
+        path: "{{ ngrok_bin_path }}"
+        mode: "0755"
+        owner: root
+        group: root
+
+    - name: Create helper script for SonarQube tunnel
+      ansible.builtin.copy:
+        dest: /usr/local/bin/sonarqube-ngrok
+        mode: "0755"
+        owner: root
+        group: root
+        content: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          ACTION="${1:-status}"
+          TOKEN="${2:-${NGROK_AUTHTOKEN:-}}"
+          SONAR_URL="${SONAR_URL:-http://192.168.242.11:30090}"
+          LOG_FILE="/tmp/ngrok-sonarqube.log"
+          SHARED_URL_FILE="/vagrant/sonarqube-ngrok-url.txt"
+
+          get_public_url() {
+            curl -sS http://127.0.0.1:4040/api/tunnels \
+              | jq -r '.tunnels[]? | select(.proto=="https") | .public_url' \
+              | head -n1
+          }
+
+          case "$ACTION" in
+            start)
+              mkdir -p /home/vagrant/.config/ngrok
+              chown -R vagrant:vagrant /home/vagrant/.config
+
+              if [ -n "$TOKEN" ]; then
+                su - vagrant -c "ngrok config add-authtoken '$TOKEN'"
+              elif [ ! -f /home/vagrant/.config/ngrok/ngrok.yml ]; then
+                echo "ngrok token is not configured yet."
+                echo "Run once: ngrok config add-authtoken <YOUR_TOKEN>"
+                echo "Then use: sudo sonarqube-ngrok start"
+                exit 1
+              fi
+
+              pkill -f "ngrok http" >/dev/null 2>&1 || true
+              nohup su - vagrant -c "ngrok http '$SONAR_URL' --log=stdout" >"$LOG_FILE" 2>&1 &
+
+              echo "Starting ngrok tunnel to $SONAR_URL ..."
+              for _ in $(seq 1 20); do
+                URL="$(get_public_url || true)"
+                if [ -n "$URL" ] && [ "$URL" != "null" ]; then
+                  echo "Tunnel ready: $URL"
+                  echo "$URL" > "$SHARED_URL_FILE"
+                  chmod 0644 "$SHARED_URL_FILE" || true
+                  echo "Log file: $LOG_FILE"
+                  echo "Saved URL to: $SHARED_URL_FILE"
+                  exit 0
+                fi
+                sleep 1
+              done
+
+              echo "ngrok started but tunnel URL is not ready yet."
+              echo "Check logs: tail -n 100 $LOG_FILE"
+              exit 1
+              ;;
+
+            status)
+              if pgrep -f "ngrok http" >/dev/null 2>&1; then
+                URL="$(get_public_url || true)"
+                if [ -n "$URL" ] && [ "$URL" != "null" ]; then
+                  echo "ngrok running. Public URL: $URL"
+                else
+                  echo "ngrok process is running, waiting for tunnel URL..."
+                fi
+              else
+                echo "ngrok is not running."
+                exit 1
+              fi
+              ;;
+
+            stop)
+              pkill -f "ngrok http" >/dev/null 2>&1 || true
+              echo "ngrok tunnel stopped."
+              ;;
+
+            logs)
+              tail -n 100 "$LOG_FILE"
+              ;;
+
+            *)
+              echo "Unknown action: $ACTION"
+              echo "Usage: sonarqube-ngrok {start|status|stop|logs} [NGROK_AUTHTOKEN]"
+              exit 1
+              ;;
+          esac
+
+    - name: Verify ngrok command is available
+      ansible.builtin.command: ngrok version
+      register: ngrok_version_output
+      changed_when: false
+
+    - name: Show installation result
+      ansible.builtin.debug:
+        msg:
+          - "ngrok installed: {{ ngrok_version_output.stdout }}"
+          - "Starting tunnel automatically during this provision run"
+
+    - name: Start SonarQube ngrok tunnel (with token when provided)
+      ansible.builtin.command: "/usr/local/bin/sonarqube-ngrok start {{ ngrok_authtoken }}"
+      environment:
+        SONAR_URL: "{{ sonar_url }}"
+      register: ngrok_start_output
+      changed_when: true
+      when: ngrok_authtoken | length > 0
+
+    - name: Start SonarQube ngrok tunnel (without token)
+      ansible.builtin.command: "/usr/local/bin/sonarqube-ngrok start"
+      environment:
+        SONAR_URL: "{{ sonar_url }}"
+      register: ngrok_start_output_no_token
+      changed_when: false
+      failed_when: false
+      when: ngrok_authtoken | length == 0
+
+    - name: Show tunnel startup result
+      ansible.builtin.debug:
+        var: ngrok_start_output.stdout_lines
+      when: ngrok_authtoken | length > 0
+
+    - name: Show tunnel startup result without token
+      ansible.builtin.debug:
+        var: ngrok_start_output_no_token.stdout_lines
+      when: ngrok_authtoken | length == 0

@@ -55,6 +55,15 @@ Vagrant.configure("2") do |config|
       ansible.install_mode = "none"
       ansible.verbose     = false
     end
+
+    # Optional: install ngrok + helper scripts on k8s-master for exposing
+    # in-cluster SonarQube to external CI (run manually when needed).
+    #   vagrant provision k8s-master --provision-with ngrok-sonarqube
+    master.vm.provision "ngrok-sonarqube", run: "never", type: "ansible_local" do |ansible|
+      ansible.playbook    = "ansible/playbook_ngrok_sonarqube.yml"
+      ansible.install_mode = "none"
+      ansible.verbose     = false
+    end
   end
 
   # ===========================================================================
