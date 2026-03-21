@@ -136,4 +136,25 @@ Vagrant.configure("2") do |config|
       ansible.verbose     = false
     end
   end
+
+  # ===========================================================================
+  # CI BENCHMARK VM (8 GB) — Jenkins + GitLab Self-hosted
+  # ===========================================================================
+  config.vm.define "ci-bench-vm" do |ci|
+    ci.vm.hostname = "ci-bench-vm"
+    ci.vm.network "private_network", ip: "192.168.242.20" 
+
+    ci.vm.provider "vmware_desktop" do |v|
+      v.vmx["memsize"]  = "8192" 
+      v.vmx["numvcpus"] = "4"
+    end
+
+    ci.vm.provision "shell", inline: ANSIBLE_INSTALL
+
+    ci.vm.provision "ansible_local" do |ansible|
+      ansible.playbook    = "ansible/playbook_ci_bench.yml"
+      ansible.install_mode = "none"
+      ansible.verbose     = false
+    end
+  end
 end

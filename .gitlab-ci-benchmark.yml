@@ -1,0 +1,152 @@
+stages:
+  - verify
+  - sonar
+  - build
+  - scan
+  - push
+  - gitops
+
+variables:
+  DOCKER_REGISTRY: docker.io/ama2352
+  SONAR_HOST: https://didactically-keyed-cuc.ngrok-free.dev
+  GITOPS_BRANCH: main
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_HOST: tcp://docker:2375
+  IMAGE_TAG: "$CI_PIPELINE_IID-$CI_COMMIT_SHORT_SHA"
+  
+  SONAR_HOST: "https://sonarcloud.io" 
+  SONAR_TOKEN: $MY_SONARCLOUD_TOKEN 
+  SONAR_ORG: "your-org-name"
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+default:
+  interruptible: true
+
+test_dispatch:
+  stage: verify
+  image: golang:1.25.8-alpine
+  script:
+    - cd dispatch
+    - go mod download
+    - go vet ./...
+    - go test -v -coverprofile=coverage.out ./...
+  artifacts:
+    when: always
+    paths:
+      - dispatch/coverage.out
+    expire_in: 1 day
+
+test_notification:
+  stage: verify
+  image: golang:1.25.8-alpine
+  script:
+    - cd notification
+    - go mod download
+    - go vet ./...
+    - go test -v -coverprofile=coverage.out ./...
+  artifacts:
+    when: always
+    paths:
+      - notification/coverage.out
+    expire_in: 1 day
+
+scan_dependencies:
+  stage: verify
+  image: golang:1.25.8-alpine
+  script:
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - GOVULNCHECK=$(go env GOPATH)/bin/govulncheck
+    - cd dispatch
+    - $GOVULNCHECK ./...
+    - cd ../notification
+    - $GOVULNCHECK ./...
+
+sonarqube_analysis:
+  stage: sonar
+  image: sonarsource/sonar-scanner-cli:11.3
+  needs:
+    - test_dispatch
+    - test_notification
+  script:
+    - cd dispatch
+    - sonar-scanner -Dsonar.host.url=$SONAR_HOST -Dsonar.token=$SONAR_TOKEN -Dsonar.organization=$SONAR_ORG
+    - cd ../notification
+    - sonar-scanner -Dsonar.host.url=$SONAR_HOST -Dsonar.token=$SONAR_TOKEN -Dsonar.organization=$SONAR_ORG
+
+build_images:
+  stage: build
+  image: docker:26-cli
+  services:
+    - name: docker:26-dind
+      alias: docker
+  script:
+    - docker build -t dispatch-service:$IMAGE_TAG dispatch
+    - docker save dispatch-service:$IMAGE_TAG -o dispatch-service.tar
+    - docker build -t notification-service:$IMAGE_TAG notification
+    - docker save notification-service:$IMAGE_TAG -o notification-service.tar
+    - ls -lh *.tar
+  artifacts:
+    paths:
+      - dispatch-service.tar
+      - notification-service.tar
+    expire_in: 1 day
+
+scan_images:
+  stage: scan
+  image: 
+    name: aquasec/trivy:0.48.3
+    entrypoint: [""]
+  needs:
+    - build_images
+  script:
+    - trivy image --input dispatch-service.tar --severity HIGH,CRITICAL --exit-code 1 --format table
+    - trivy image --input notification-service.tar --severity HIGH,CRITICAL --exit-code 1 --format table
+
+push_images:
+  stage: push
+  image: docker:26-cli
+  services:
+    - name: docker:26-dind
+      alias: docker
+  needs:
+    - build_images
+    - scan_images
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+  script:
+    - echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USER" --password-stdin
+    - docker load -i dispatch-service.tar
+    - docker load -i notification-service.tar
+    - docker tag dispatch-service:$IMAGE_TAG $DOCKER_REGISTRY/dispatch-service:$IMAGE_TAG
+    - docker tag dispatch-service:$IMAGE_TAG $DOCKER_REGISTRY/dispatch-service:latest
+    - docker push $DOCKER_REGISTRY/dispatch-service:$IMAGE_TAG
+    - docker push $DOCKER_REGISTRY/dispatch-service:latest
+    - docker tag notification-service:$IMAGE_TAG $DOCKER_REGISTRY/notification-service:$IMAGE_TAG
+    - docker tag notification-service:$IMAGE_TAG $DOCKER_REGISTRY/notification-service:latest
+    - docker push $DOCKER_REGISTRY/notification-service:$IMAGE_TAG
+    - docker push $DOCKER_REGISTRY/notification-service:latest
+
+gitops_update_dev:
+  stage: gitops
+  image: alpine:3.20
+  needs:
+    - push_images
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - apk add --no-cache git sed
+    - GITOPS_URL=$(echo "$GITOPS_REPO_URL" | sed "s|https://|https://oauth2:$GITOPS_PUSH_TOKEN@|")
+    - git clone --branch "$GITOPS_BRANCH" --depth 1 "$GITOPS_URL" gitops-workspace
+    - cd gitops-workspace
+    - 'sed -i "s|newTag:.*|newTag: \"$IMAGE_TAG\"|" apps/dispatch/overlays/dev/kustomization.yaml'
+    - 'sed -i "s|newTag:.*|newTag: \"$IMAGE_TAG\"|" apps/notification/overlays/dev/kustomization.yaml'
+    - git config user.email "gitlab-ci@ride-hail.ci"
+    - git config user.name "GitLab CI"
+    - git add apps/dispatch/overlays/dev/kustomization.yaml apps/notification/overlays/dev/kustomization.yaml
+    - git diff --cached --quiet && echo "No GitOps changes" && exit 0
+    - "git commit -m \"ci: update image tags to $IMAGE_TAG\n\nTriggered by GitLab pipeline $CI_PIPELINE_ID\nCommit: $CI_COMMIT_SHA\nImages:\n  - $DOCKER_REGISTRY/dispatch-service:$IMAGE_TAG\n  - $DOCKER_REGISTRY/notification-service:$IMAGE_TAG\""
+    - git push origin "$GITOPS_BRANCH"

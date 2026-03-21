@@ -1,0 +1,164 @@
+---
+- name: Setup Jenkins and GitLab on Single VM
+  hosts: all
+  connection: local
+  become: true
+  vars:
+    # Cấu hình đường dẫn dữ liệu
+    base_path: "/data/ci-tools"
+    gitlab_external_url: "http://192.168.242.20"
+    jenkins_port: 8080
+
+  tasks:
+    # 1. Cài Docker
+    - name: Install Docker apt dependencies
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+        state: present
+        update_cache: true
+
+    - name: Create apt keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Add Docker GPG key
+      ansible.builtin.shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+          | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Add Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: >
+          deb [arch={{ ansible_architecture | replace('x86_64', 'amd64') }}
+          signed-by=/etc/apt/keyrings/docker.gpg]
+          https://download.docker.com/linux/ubuntu
+          {{ ansible_distribution_release }} stable
+        filename: docker
+        state: present
+
+    - name: Install Docker CE packages
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: true
+
+    - name: Enable and start Docker service
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add vagrant user to docker group (idempotent)
+      ansible.builtin.user:
+        name: vagrant
+        groups: docker
+        append: true
+
+    # Cài đặt Docker SDK cho Python và Collection (Rất quan trọng)
+    - name: Install Docker SDK for Python
+      ansible.builtin.apt:
+        name: python3-docker
+        state: present
+
+    - name: Install community.docker collection
+      ansible.builtin.shell: ansible-galaxy collection install community.docker
+      become: false # Chạy bằng user vagrant
+
+    # 2. Tạo thư mục với phân quyền chính xác
+    - name: Create GitLab directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ base_path }}/gitlab/config"
+        - "{{ base_path }}/gitlab/logs"
+        - "{{ base_path }}/gitlab/data"
+
+    - name: Create Jenkins home with UID 1000
+      ansible.builtin.file:
+        path: "{{ base_path }}/jenkins"
+        state: directory
+        owner: "1000" # Quan trọng để Jenkins container ghi được dữ liệu
+        group: "1000"
+        mode: "0755"
+
+    # 3. Chạy GitLab Container (Tăng cường tối ưu)
+    - name: Run GitLab CE
+      community.docker.docker_container:
+        name: gitlab
+        image: gitlab/gitlab-ce:latest
+        state: started
+        restart_policy: unless-stopped
+        published_ports:
+          - "80:80"
+          - "2222:22"
+        volumes:
+          - "{{ base_path }}/gitlab/config:/etc/gitlab"
+          - "{{ base_path }}/gitlab/logs:/var/log/gitlab"
+          - "{{ base_path }}/gitlab/data:/var/opt/gitlab"
+        env:
+          GITLAB_OMNIBUS_CONFIG: |
+            external_url '{{ gitlab_external_url }}'
+            puma['worker_processes'] = 2
+            sidekiq['max_concurrency'] = 5
+            # Tắt toàn bộ cụm Monitoring
+            prometheus['enable'] = false
+            alertmanager['enable'] = false
+            node_exporter['enable'] = false
+            redis_exporter['enable'] = false
+            postgres_exporter['enable'] = false
+            gitlab_exporter['enable'] = false
+
+    # 4. Chạy Jenkins Container (DooD)
+    - name: Run Jenkins Controller
+      community.docker.docker_container:
+        name: jenkins
+        image: jenkins/jenkins:lts-jdk17
+        state: started
+        restart_policy: unless-stopped
+        published_ports:
+          - "{{ jenkins_port }}:8080"
+        volumes:
+          - "{{ base_path }}/jenkins:/var/jenkins_home"
+          - "/var/run/docker.sock:/var/run/docker.sock"
+          - "/usr/bin/docker:/usr/bin/docker:ro"
+        env:
+          JAVA_OPTS: "-Xms512m -Xmx2g"
+    
+    # 5. Tạo thư mục cấu hình cho Runner
+    - name: Create GitLab Runner config directory
+      ansible.builtin.file:
+        path: "{{ base_path }}/gitlab-runner"
+        state: directory
+        mode: "0755"
+
+    # 6. Chạy GitLab Runner Container
+    - name: Run GitLab Runner
+      community.docker.docker_container:
+        name: gitlab-runner
+        image: gitlab/gitlab-runner:latest
+        state: started
+        restart_policy: always
+        volumes:
+          # Mount socket để Runner có thể tạo các container build (DooD)
+          - "/var/run/docker.sock:/var/run/docker.sock"
+          # Mount folder cấu hình để lưu thông tin đăng ký (Registration)
+          - "{{ base_path }}/gitlab-runner:/etc/gitlab-runner"
+
+    # 7. Đảm bảo Docker socket có quyền đọc/ghi cho tất cả (Cần thiết cho DooD)
+    - name: Ensure Docker socket is world-readable for containers
+      ansible.builtin.file:
+        path: /var/run/docker.sock
+        mode: "0666"
