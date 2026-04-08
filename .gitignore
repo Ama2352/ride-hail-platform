@@ -44,6 +44,5 @@ desktop.ini
 *.swo
 *~
 
-.keys/private.pem
-.keys/public.pem
+.keys/
 .secrets/raw.yml
