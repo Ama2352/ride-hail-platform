@@ -93,7 +93,7 @@
               fi
 
               pkill -f "ngrok http" >/dev/null 2>&1 || true
-              nohup su - vagrant -c "ngrok http '$SONAR_URL' --log=stdout" >"$LOG_FILE" 2>&1 &
+              su - vagrant -c "nohup ngrok http '$SONAR_URL' --log=stdout > $LOG_FILE 2>&1 &"
 
               echo "Starting ngrok tunnel to $SONAR_URL ..."
               for _ in $(seq 1 20); do

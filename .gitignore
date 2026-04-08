@@ -43,3 +43,7 @@ desktop.ini
 *.swp
 *.swo
 *~
+
+.keys/private.pem
+.keys/public.pem
+.secrets/raw.yml
