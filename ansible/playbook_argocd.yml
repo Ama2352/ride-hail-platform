@@ -16,6 +16,8 @@
   vars:
     argocd_version: "v2.14.9"   # v3.x incompatible with Ubuntu 22.04 coreutils 8.32
     argocd_nodeport: 30080
+    kubectl_retry_count: 12
+    kubectl_retry_delay_seconds: 15
 
   tasks:
 
@@ -42,13 +44,28 @@
       ansible.builtin.debug:
         msg: "Pre-flight passed: {{ worker_count.stdout | trim }} Ready worker node(s) found."
 
+    - name: Wait for Kubernetes API server readiness
+      ansible.builtin.command: >
+        kubectl --request-timeout=10s get --raw=/readyz
+      register: apiserver_ready
+      changed_when: false
+      retries: "{{ kubectl_retry_count }}"
+      delay: "{{ kubectl_retry_delay_seconds }}"
+      until:
+        - apiserver_ready.rc == 0
+        - "'ok' in (apiserver_ready.stdout | lower)"
+
     # -------------------------------------------------------------------------
     # 2. NAMESPACE
     # -------------------------------------------------------------------------
     - name: Create argocd namespace (idempotent)
       ansible.builtin.shell: |
         kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f -
-      changed_when: true
+      register: argocd_namespace
+      changed_when: "'created' in argocd_namespace.stdout or 'configured' in argocd_namespace.stdout"
+      retries: "{{ kubectl_retry_count }}"
+      delay: "{{ kubectl_retry_delay_seconds }}"
+      until: argocd_namespace.rc == 0
 
     # -------------------------------------------------------------------------
     # 3. INSTALL
@@ -59,7 +76,13 @@
         kubectl apply -n argocd --server-side --force-conflicts
         -f https://raw.githubusercontent.com/argoproj/argo-cd/{{ argocd_version }}/manifests/install.yaml
       register: argocd_install
-      changed_when: '"configured" in argocd_install.stdout or "created" in argocd_install.stdout'
+      changed_when: >-
+        "configured" in argocd_install.stdout or
+        "created" in argocd_install.stdout or
+        "serverside-applied" in argocd_install.stdout
+      retries: "{{ kubectl_retry_count }}"
+      delay: "{{ kubectl_retry_delay_seconds }}"
+      until: argocd_install.rc == 0
 
     # -------------------------------------------------------------------------
     # 4. EXPOSE — NodePort so the UI is reachable from the host network
@@ -68,7 +91,11 @@
       ansible.builtin.shell: |
         kubectl patch svc argocd-server -n argocd \
           -p '{"spec":{"type":"NodePort","ports":[{"port":443,"targetPort":8080,"nodePort":{{ argocd_nodeport }}}]}}'
-      changed_when: true
+      register: argocd_nodeport_patch
+      changed_when: "'patched' in argocd_nodeport_patch.stdout"
+      retries: "{{ kubectl_retry_count }}"
+      delay: "{{ kubectl_retry_delay_seconds }}"
+      until: argocd_nodeport_patch.rc == 0
 
     # -------------------------------------------------------------------------
     # 5. VERIFY
@@ -113,6 +140,9 @@
         -f https://raw.githubusercontent.com/ama2352/ride-hail-gitops/main/root-app.yaml
       register: root_app
       changed_when: '"configured" in root_app.stdout or "created" in root_app.stdout'
+      retries: "{{ kubectl_retry_count }}"
+      delay: "{{ kubectl_retry_delay_seconds }}"
+      until: root_app.rc == 0
 
     - name: Print GitOps bootstrap result
       ansible.builtin.debug:

@@ -10,6 +10,8 @@
   vars:
     k8s_version: "1.30"
     pod_network_cidr: "192.168.0.0/16"
+    calico_version: "v3.31.4"
+    calico_wait_timeout: "600s"
 
   tasks:
 
@@ -157,37 +159,109 @@
         mode: "0600"
         force: false
 
+    - name: Install Calico operator CRDs
+      become_user: vagrant
+      ansible.builtin.shell: |
+        if kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/operator-crds.yaml; then
+          echo "created"
+        else
+          kubectl replace -f https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/operator-crds.yaml
+          echo "replaced"
+        fi
+      register: calico_operator_crds
+      changed_when: "'created' in calico_operator_crds.stdout or 'replaced' in calico_operator_crds.stdout"
+
     - name: Install Calico operator
       become_user: vagrant
       ansible.builtin.command: >
         kubectl create -f
-        https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/tigera-operator.yaml
+        https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/tigera-operator.yaml
       register: calico_operator
       failed_when:
         - calico_operator.rc != 0
-        - '"already exists" not in calico_operator.stderr'
+        - '"AlreadyExists" not in calico_operator.stderr'
       changed_when: calico_operator.rc == 0
+
+    - name: Wait for Calico operator CRDs to be established
+      become_user: vagrant
+      ansible.builtin.command: >
+        kubectl wait --for=condition=Established crd/{{ item }} --timeout=180s
+      loop:
+        - installations.operator.tigera.io
+        - apiservers.operator.tigera.io
+        - goldmanes.operator.tigera.io
+        - whiskers.operator.tigera.io
 
     - name: Install Calico custom resources
       become_user: vagrant
       ansible.builtin.command: >
         kubectl create -f
-        https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/custom-resources.yaml
+        https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/custom-resources.yaml
       register: calico_cr
       failed_when:
         - calico_cr.rc != 0
-        - '"already exists" not in calico_cr.stderr'
+        - '"AlreadyExists" not in calico_cr.stderr'
       changed_when: calico_cr.rc == 0
 
-    - name: Wait for Calico node pods to be ready
+    - name: Wait for Calico components to be ready
       become_user: vagrant
-      ansible.builtin.command: >
-        kubectl wait --for=condition=ready pod
-        -l k8s-app=calico-node -n calico-system --timeout=300s
-      retries: 3
-      delay: 15
-      register: calico_wait
-      until: calico_wait.rc == 0
+      block:
+        - name: Wait for Tigera operator deployment
+          ansible.builtin.command: >
+            kubectl rollout status deployment/tigera-operator
+            -n tigera-operator --timeout={{ calico_wait_timeout }}
+          register: tigera_wait
+          retries: 3
+          delay: 10
+          until: tigera_wait.rc == 0
+
+        - name: Wait for Calico kube-controllers deployment
+          ansible.builtin.command: >
+            kubectl rollout status deployment/calico-kube-controllers
+            -n calico-system --timeout={{ calico_wait_timeout }}
+          register: calico_controllers_wait
+          retries: 3
+          delay: 10
+          until: calico_controllers_wait.rc == 0
+
+        - name: Wait for Calico node daemonset rollout
+          ansible.builtin.command: >
+            kubectl rollout status daemonset/calico-node
+            -n calico-system --timeout={{ calico_wait_timeout }}
+          register: calico_ds_wait
+          retries: 3
+          delay: 15
+          until: calico_ds_wait.rc == 0
+
+        - name: Wait for Calico node pods to be ready
+          ansible.builtin.command: >
+            kubectl wait --for=condition=ready pod
+            -l k8s-app=calico-node -n calico-system --timeout={{ calico_wait_timeout }}
+          retries: 3
+          delay: 15
+          register: calico_wait
+          until: calico_wait.rc == 0
+      rescue:
+        - name: Capture Calico diagnostics after readiness timeout
+          ansible.builtin.shell: |
+            echo "=== calico-system pods ==="
+            kubectl get pods -n calico-system -o wide || true
+            echo
+            echo "=== calico-node describe ==="
+            kubectl describe pod -n calico-system -l k8s-app=calico-node || true
+            echo
+            echo "=== calico-node logs (all containers, tail 200) ==="
+            kubectl logs -n calico-system -l k8s-app=calico-node --all-containers=true --tail=200 || true
+          register: calico_debug
+          changed_when: false
+          failed_when: false
+
+        - name: Fail with Calico diagnostics
+          ansible.builtin.fail:
+            msg: |
+              Calico did not become ready within {{ calico_wait_timeout }}.
+              Diagnostics:
+              {{ calico_debug.stdout }}
 
     # -------------------------------------------------------------------------
     # FIX COREDNS UPSTREAM DNS

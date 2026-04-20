@@ -28,14 +28,14 @@ Vagrant.configure("2") do |config|
   end
 
   # ===========================================================================
-  # MASTER NODE (2 GB) — Control plane + ArgoCD (Phase 2)
+  # MASTER NODE (4 GB) — Control plane + ArgoCD (Phase 2)
   # ===========================================================================
   config.vm.define "k8s-master" do |master|
     master.vm.hostname = "k8s-master"
     master.vm.network "private_network", ip: "192.168.242.10"
 
     master.vm.provider "vmware_desktop" do |v|
-      v.vmx["memsize"]  = "2048"
+      v.vmx["memsize"]  = "4096"
       v.vmx["numvcpus"] = "2"
     end
 
